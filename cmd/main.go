@@ -41,6 +41,7 @@ import (
 
 	migrationsv1alpha1 "kubevirt.io/kubevirt-migration-operator/api/v1alpha1"
 	"kubevirt.io/kubevirt-migration-operator/internal/controller"
+	"kubevirt.io/kubevirt-migration-operator/pkg/tlsconfig"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -146,12 +147,24 @@ func main() {
 		TLSOpts:       tlsOpts,
 	}
 
+	// tlsWatcher watches MigController CRs for TLS profile changes and
+	// dynamically updates the metrics server's TLS config. Created before
+	// the manager so TLSOpt() is in the TLSOpts slice when the metrics server
+	// starts; the cache is wired after manager creation via SetCache.
+	var tlsWatcher *tlsconfig.Watcher
+
 	if secureMetrics {
 		// FilterProvider is used to protect the metrics endpoint with authn/authz.
 		// These configurations ensure that only authorized users and service accounts
 		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
 		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.4/pkg/metrics/filters#WithAuthenticationAndAuthorization
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
+
+		// Use GetConfigForClient to dynamically derive TLS cipher suites and min
+		// version from the MigController CR's TLSSecurityProfile. Piggy-backs on
+		// the informer already maintained by the controller-runtime cache.
+		tlsWatcher = tlsconfig.NewWatcher()
+		metricsServerOptions.TLSOpts = append(metricsServerOptions.TLSOpts, tlsWatcher.TLSOpt())
 	}
 
 	// If the certificate is not specified, controller-runtime will automatically
@@ -222,6 +235,14 @@ func main() {
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
+
+	if tlsWatcher != nil {
+		tlsWatcher.SetCache(mgr.GetCache())
+		if err := mgr.Add(tlsWatcher); err != nil {
+			setupLog.Error(err, "unable to add TLS config watcher to manager")
+			os.Exit(1)
+		}
+	}
 
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
